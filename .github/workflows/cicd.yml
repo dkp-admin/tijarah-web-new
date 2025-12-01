@@ -1,0 +1,88 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: dev-tijarah
+  REGION: us-central1
+  SERVICE_NAME: tijarah-web
+  REGISTRY: us-central1-docker.pkg.dev
+  IMAGE_NAME: us-central1-docker.pkg.dev/dev-tijarah/tijarah-images/tijarah-web
+
+jobs:
+  build:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image_tag: ${{ steps.build.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
+
+      - name: Build and Push
+        id: build
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} -t ${{ env.IMAGE_NAME }}:latest .
+          docker push ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ env.IMAGE_NAME }}:latest
+          echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "✅ Image built and pushed successfully"
+
+  deploy:
+    name: Deploy to Cloud Run
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }} \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --memory 1Gi \
+            --cpu 1 \
+            --min-instances 1 \
+            --max-instances 10 \
+            --set-env-vars "NODE_ENV=production,NEXT_PUBLIC_APP_ENV=production,NEXT_PUBLIC_FRONTEND_URL=https://app.tijarah360.com,NEXT_PUBLIC_PRODUCTION_API_URL=https://be.tijarah360.com"
+
+      - name: Output URL
+        run: |
+          echo "=========================================="
+          echo "✅ Deployment successful!"
+          echo "=========================================="
+          gcloud run services describe ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --format 'value(status.url)'
